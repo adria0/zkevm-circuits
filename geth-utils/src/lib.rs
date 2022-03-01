@@ -4,6 +4,9 @@ use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+mod ethtest_dto;
+mod local_dto;
+
 extern "C" {
     fn CreateTrace(str: *const c_char) -> *const c_char;
     fn FreeString(str: *const c_char);
@@ -85,6 +88,12 @@ mod test {
                 }
             }"#,
         ] {
+            if let Err(err) = trace(config) {
+                println!("===========================================");
+                println!("{}", config);
+                println!("{}", err);
+                println!("===========================================");
+            }
             assert!(trace(config).is_ok());
         }
     }

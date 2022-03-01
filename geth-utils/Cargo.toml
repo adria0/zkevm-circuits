@@ -3,6 +3,13 @@ name = "geth-utils"
 version = "0.1.0"
 edition = "2018"
 
+[dependencies]
+ethereum-types = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4.3"
+yaml-rust = "0.4.5"
 
 [build-dependencies]
 gobuild = "0.1.0-alpha.1"
+
