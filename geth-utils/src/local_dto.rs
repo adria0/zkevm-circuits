@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use ethereum_types::{Address, H256, U256};
+use ethers_core::types::{Address, H256, U256};
 use serde::{Serialize, Serializer};
 use std::collections::HashMap;
 
