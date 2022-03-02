@@ -4,7 +4,8 @@ use std::fmt;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use yaml_rust::Yaml;
-t 
+use anyhow::{Error,Result, Context, bail};
+
 type Tag = String;
 type Label = String;
 
@@ -77,19 +78,17 @@ struct StateTest {
 }
 
 impl StateTest {
-    pub fn gen_from_yaml(source: &str) -> Vec<Self> {
-        let doc = yaml_rust::YamlLoader::load_from_str(source)
-            .unwrap()
+    pub fn gen_from_yaml(source: &str) -> Result<Vec<Self>> {
+        let doc = yaml_rust::YamlLoader::load_from_str(source)?
             .into_iter()
-            .next()
-            .unwrap();
+            .next().context("get yaml doc")?;
 
-        let test_names: Vec<&str> = doc
+        let test_names: Vec<_> = doc
             .as_hash()
-            .unwrap()
+            .context("as_hash")?
             .keys()
-            .map(|v| v.as_str().unwrap())
-            .collect();
+            .map(|v| v.as_str().context("as_str"))
+            .collect::<Result<_>>()?;
 
         let mut tests = Vec::new();
 
@@ -99,52 +98,52 @@ impl StateTest {
             // parse env
             let yaml_env = &yaml_test["env"];
             let env = Env {
-                current_coinbase: Self::as_address(&yaml_env["currentCoinbase"]),
-                current_difficulty: Self::as_u256(&yaml_env["currentDifficulty"]),
-                current_gas_limit: Self::as_u64(&yaml_env["currentGasLimit"]),
-                current_number: Self::as_u64(&yaml_env["currentNumber"]),
-                current_timestamp: Self::as_u64(&yaml_env["currentTimestamp"]),
-                previous_hash: Self::as_hash(&yaml_env["previousHash"]),
+                current_coinbase: Self::as_address(&yaml_env["currentCoinbase"])?,
+                current_difficulty: Self::as_u256(&yaml_env["currentDifficulty"])?,
+                current_gas_limit: Self::as_u64(&yaml_env["currentGasLimit"])?,
+                current_number: Self::as_u64(&yaml_env["currentNumber"])?,
+                current_timestamp: Self::as_u64(&yaml_env["currentTimestamp"])?,
+                previous_hash: Self::as_hash(&yaml_env["previousHash"])?,
             };
 
             // parse pre
-            let pre = Self::as_accounts(&yaml_test["pre"]);
+            let pre = Self::as_accounts(&yaml_test["pre"])?;
 
             // parse transaction
             let yaml_transaction = &yaml_test["transaction"];
-            let data_s = yaml_transaction["data"]
+            let data_s : Vec<_>= yaml_transaction["data"]
                 .as_vec()
-                .unwrap()
+                .context("as_vec")?
                 .iter()
                 .map(|d| Self::as_calldata(d))
-                .collect::<Vec<_>>();
+                .collect::<Result<_>>()?;
 
-            let gas_limit_s = yaml_transaction["gasLimit"]
+            let gas_limit_s : Vec<_> = yaml_transaction["gasLimit"]
                 .as_vec()
-                .unwrap()
+                .context("as_vec")?
                 .iter()
                 .map(|d| Self::as_u64(d))
-                .collect::<Vec<u64>>();
+                .collect::<Result<_>>()?;
 
-            let value_s = yaml_transaction["value"]
+            let value_s : Vec<_> = yaml_transaction["value"]
                 .as_vec()
-                .unwrap()
+                .context("as_vec")?
                 .iter()
                 .map(|d| Self::as_u256(d))
-                .collect::<Vec<U256>>();
+                .collect::<Result<_>>()?;
 
-            let gas_price = Self::as_u64(&yaml_transaction["gasPrice"]);
-            let nonce = Self::as_u64(&yaml_transaction["nonce"]);
-            let to = Self::as_address(&yaml_transaction["to"]);
-            let secret_key = Self::as_bytes(&yaml_transaction["secretKey"]);
+            let gas_price = Self::as_u64(&yaml_transaction["gasPrice"])?;
+            let nonce = Self::as_u64(&yaml_transaction["nonce"])?;
+            let to = Self::as_address(&yaml_transaction["to"])?;
+            let secret_key = Self::as_bytes(&yaml_transaction["secretKey"])?;
 
             // parse expects
             let mut expects = Vec::new();
-            for expect in yaml_test["expect"].as_vec().unwrap().iter() {
-                let data_refs = Self::as_refs(&expect["indexes"]["data"]);
-                let gas_refs = Self::as_refs(&expect["indexes"]["gas"]);
-                let value_refs = Self::as_refs(&expect["indexes"]["value"]);
-                let result = Self::as_accounts(&expect["result"]);
+            for expect in yaml_test["expect"].as_vec().context("as_vec")?.iter() {
+                let data_refs = Self::as_refs(&expect["indexes"]["data"])?;
+                let gas_refs = Self::as_refs(&expect["indexes"]["gas"])?;
+                let value_refs = Self::as_refs(&expect["indexes"]["value"])?;
+                let result = Self::as_accounts(&expect["result"])?;
                 expects.push((data_refs, gas_refs, value_refs, result));
             }
 
@@ -194,12 +193,12 @@ impl StateTest {
             }
         }
 
-        tests
+        Ok(tests)
     }
 
-    fn as_accounts(yaml: &Yaml) -> HashMap<Address, Account> {
+    fn as_accounts(yaml: &Yaml) -> Result<HashMap<Address, Account>> {
         let mut accounts = HashMap::new();
-        for (address, account) in yaml.as_hash().unwrap().iter() {
+        for (address, account) in yaml.as_hash().context("as_hash")?.iter() {
             let acc_storage = &account["storage"];
             let acc_balance = &account["balance"];
             let acc_code = &account["code"];
@@ -207,31 +206,31 @@ impl StateTest {
 
             let mut storage = HashMap::new();
             if !acc_storage.is_badvalue() {
-                for (slot, value) in account["storage"].as_hash().unwrap().iter() {
-                    storage.insert(Self::as_u256(slot), Self::as_u256(value));
+                for (slot, value) in account["storage"].as_hash().context("as_hash")?.iter() {
+                    storage.insert(Self::as_u256(slot)?, Self::as_u256(value)?);
                 }
             }
             let account = Account {
                 balance: if acc_balance.is_badvalue() {
                     None
                 } else {
-                    Some(Self::as_u256(acc_balance))
+                    Some(Self::as_u256(acc_balance)?)
                 },
                 code: if acc_code.is_badvalue() {
                     None
                 } else {
-                    Some(Self::as_code(acc_code))
+                    Some(Self::as_code(acc_code)?)
                 },
                 nonce: if acc_nonce.is_badvalue() {
                     None
                 } else {
-                    Some(Self::as_u64(acc_nonce))
+                    Some(Self::as_u64(acc_nonce)?)
                 },
                 storage,
             };
-            accounts.insert(Self::as_address(address), account);
+            accounts.insert(Self::as_address(address)?, account);
         }
-        accounts
+        Ok(accounts)
     }
 
     fn decompose_tags(expr: &str) -> HashMap<Tag, String> {
@@ -239,7 +238,7 @@ impl StateTest {
 
         let expr = expr.trim();
         if expr.starts_with(":") {
-            let re = regex::Regex::new(TAGS_REGEXP).unwrap();
+            let re = regex::Regex::new(TAGS_REGEXP).expect("static regexp do not fail. qad.");
             re.captures_iter(expr)
                 .map(|cap| (cap[2].trim().into(), cap[3].trim().into()))
                 .collect()
@@ -250,66 +249,63 @@ impl StateTest {
         }
     }
 
-    fn as_address(yaml: &Yaml) -> Address {
-        if yaml.as_str().is_some() {
-            Address::from_slice(
-                &hex::decode(yaml.as_str().expect("not an address")).expect("cannot deode"),
-            )
-        } else if yaml.as_i64().is_some() {
-            let hex = format!("{:0>40}", yaml.as_i64().unwrap());
-            Address::from_slice(&hex::decode(hex).unwrap())
+    fn as_address(yaml: &Yaml) -> Result<Address> {
+        if let Some(as_str) = yaml.as_str() {
+            Ok(Address::from_slice(
+                &hex::decode(as_str)?,
+            ))
+        } else if let Some(as_i64) =yaml.as_i64() {
+            let hex = format!("{:0>40}", as_i64);
+            Ok(Address::from_slice(&hex::decode(hex)?))
         } else {
-            panic!("cannot address");
+            bail!("cannot address");
         }
     }
 
-    fn as_bytes(yaml: &Yaml) -> Bytes {
-        let as_str = yaml.as_str().unwrap();
-        Bytes(hex::decode(&yaml.as_str().unwrap()[2..]).unwrap())
+    fn as_bytes(yaml: &Yaml) -> Result<Bytes> {
+        let as_str = yaml.as_str().context("as_str")?;
+        Ok(Bytes(hex::decode(&as_str[2..])?))
     }
 
-    fn as_calldata(yaml: &Yaml) -> (Bytes, Option<Label>) {
+    fn as_calldata(yaml: &Yaml) -> Result<(Bytes, Option<Label>)> {
         let tags = Self::decompose_tags(yaml.as_str().unwrap());
         let label = tags.get(":label").cloned();
 
         if tags.contains_key(":raw") {
-            (Bytes(hex::decode(&tags[":raw"][2..]).unwrap()), label)
+            Ok((Bytes(hex::decode(&tags[":raw"][2..]).unwrap()), label))
         } else if tags.contains_key(":abi") {
-            (Self::encode_abi_funccall(&tags[":abi"]), label)
+            Ok((Self::encode_abi_funccall(&tags[":abi"]), label))
         } else {
-            println!("{:?}", yaml);
-            panic!("do not know what to do with calldata")
+            bail!("do not know what to do with calldata")
         }
     }
 
-    fn compile_lllc(src: &str) -> Bytes {
+    fn compile_lllc(src: &str) -> Result<Bytes> {
         const LLC_PATH: &str = "/Users/adriamassanet/w/ef/solidity/build/lllc/lllc";
         let mut child = Command::new(LLC_PATH)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .spawn()?;
 
         child
             .stdin
             .as_mut()
-            .unwrap()
-            .write_all(src.as_bytes())
-            .unwrap();
+            .context("failed to open stdin")?
+            .write_all(src.as_bytes())?;
 
-        let output = child.wait_with_output().unwrap();
+        let output = child.wait_with_output()?;
 
         if output.status.success() {
-            let raw_output = String::from_utf8(output.stdout).unwrap();
-            Bytes(hex::decode(raw_output.trim()).unwrap())
+            let raw_output = String::from_utf8(output.stdout)?;
+            Ok(Bytes(hex::decode(raw_output.trim())?))
         } else {
-            let _err = String::from_utf8(output.stderr).unwrap();
-            panic!("External command failed")
+            let err = String::from_utf8(output.stderr)?;
+            bail!("lllc command failed {:?}",err)
         }
     }
 
-    fn encode_abi_funccall(spec: &str) -> Bytes {
+    fn encode_abi_funccall(spec: &str) -> Result<Bytes> {
         use ethers_core::abi::{Function, Param, ParamType, StateMutability, Token};
 
         let tokens: Vec<_> = spec.split(' ').collect();
@@ -326,7 +322,7 @@ impl StateTest {
         };
 
         let encode_type = |t, v| match t {
-            &ParamType::Uint(32) => Token::Uint(U256::from_str_radix(v, 10).unwrap()),
+            &ParamType::Uint(32) => U256::from_str_radix(v, 10).and_then(|x| Ok(Token::Uint(x))),
             _ => unimplemented!(),
         };
 
@@ -340,11 +336,11 @@ impl StateTest {
             })
             .collect();
 
-        let tokens: Vec<_> = inputs
+        let tokens: Vec<Token> = inputs
             .iter()
             .zip(args)
             .map(|(typ, val)| encode_type(&typ.kind, val))
-            .collect();
+            .collect::<Result<_>>();
 
         #[allow(deprecated)]
         let func = Function {
@@ -355,15 +351,15 @@ impl StateTest {
             constant: false,
         };
 
-        Bytes(func.encode_input(&tokens).unwrap())
+        Ok(Bytes(func.encode_input(&tokens)?))
     }
 
-    fn as_code(yaml: &Yaml) -> Bytes {
-        let tags = Self::decompose_tags(yaml.as_str().unwrap());
+    fn as_code(yaml: &Yaml) -> Result<Bytes> {
+        let tags = Self::decompose_tags(yaml.as_str().context("not an str")?);
 
         if tags.contains_key("") {
             if tags[""].starts_with("0x") {
-                Bytes(hex::decode(&tags[""][2..]).unwrap())
+                Ok(Bytes(hex::decode(&tags[""][2..])?))
             } else if tags[""].starts_with("{") {
                 let code = tags[""]
                     .trim_start_matches("{")
@@ -371,50 +367,50 @@ impl StateTest {
                     .trim();
                 Self::compile_lllc(code)
             } else {
-                panic!("do not know what to do with code");
+                bail!("do not know what to do with code");
             }
         } else if tags.contains_key(":raw") {
-            Bytes(hex::decode(&tags[":raw"][2..]).unwrap())
+            Ok(Bytes(hex::decode(&tags[":raw"][2..])?))
         } else {
-            panic!("do not know what to do with code");
+            bail!("do not know what to do with code");
         }
     }
 
-    fn as_hash(yaml: &Yaml) -> H256 {
-        H256::from_slice(&hex::decode(yaml.as_str().unwrap()).expect("cannot deode"))
+    fn as_hash(yaml: &Yaml) -> Result<H256> {
+        Ok(H256::from_slice(&hex::decode(yaml.as_str().context("not a str")?)?))
     }
 
-    fn as_u256(yaml: &Yaml) -> U256 {
+    fn as_u256(yaml: &Yaml) -> Result<U256> {
         if let Some(as_int) = yaml.as_i64() {
-            U256::from(as_int)
+            Ok(U256::from(as_int))
         } else if let Some(as_str) = yaml.as_str() {
             if as_str.starts_with("0x") {
-                U256::from_str_radix(&as_str[2..], 16).unwrap()
+                Ok(U256::from_str_radix(&as_str[2..], 16)?)
             } else {
-                U256::from_str_radix(as_str, 10).unwrap()
+                Ok(U256::from_str_radix(as_str, 10)?)
             }
         } else {
-            panic!("not aun u256")
+            bail!("{:?}",yaml)
         }
     }
 
-    fn as_u64(yaml: &Yaml) -> u64 {
+    fn as_u64(yaml: &Yaml) -> Result<u64> {
         if let Some(as_int) = yaml.as_i64() {
-            as_int as u64
+            Ok(as_int as u64)
         } else if let Some(as_str) = yaml.as_str() {
             if as_str.starts_with("0x") {
-                U256::from_str_radix(&as_str[2..], 16).unwrap().as_u64()
+                Ok(U256::from_str_radix(&as_str[2..], 16)?.as_u64())
             } else {
-                U256::from_str_radix(as_str, 10).unwrap().as_u64()
+                Ok(U256::from_str_radix(as_str, 10)?.as_u64())
             }
         } else {
-            panic!("not aun u264")
+            bail!("{:?}",yaml)
         }
     }
 
-    fn as_refs(yaml: &Yaml) -> Refs {
+    fn as_refs(yaml: &Yaml) -> Result<Refs> {
         let yamls = if yaml.is_array() {
-            yaml.as_vec().unwrap().to_owned()
+            yaml.as_vec().with_context(|| format!("{:?}",yaml))?.to_owned()
         } else {
             vec![yaml.to_owned()]
         };
@@ -433,25 +429,14 @@ impl StateTest {
                 if tags.contains_key(":label") {
                     Ref::Label(tags[":label"].to_owned())
                 } else {
-                    println!("{:?}", yaml);
-                    panic!("not tagorindex")
+                    bail!("{:?}", yaml);
                 }
             } else {
-                println!("----->{:?}<------", yaml);
-                panic!("not tagorindex")
+                bail!("{:?}", yaml);
             };
             refs.push(r);
         }
-        Refs(refs)
-    }
-
-    fn as_i64(yaml: &Yaml) -> i64 {
-        if let Some(as_int) = yaml.as_i64() {
-            as_int
-        } else {
-            println!("{:?}", yaml);
-            panic!("not aun i64")
-        }
+        Ok(Refs(refs))
     }
 }
 
@@ -689,5 +674,4 @@ add:
 
     let tests = StateTest::gen_from_yaml(code);
     println!("{:#?}", tests);
-    unreachable!()
 }
