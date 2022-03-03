@@ -4,7 +4,7 @@ use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-mod ethtest_dto;
+mod ethtests;
 mod local_dto;
 
 extern "C" {
