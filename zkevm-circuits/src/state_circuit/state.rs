@@ -10,7 +10,7 @@ use bus_mapping::operation::{MemoryOp, Operation, OperationContainer, StackOp, S
 use eth_types::Field;
 use halo2_proofs::{
     circuit::{Layouter, Region, SimpleFloorPlanner},
-    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, VirtualCells},
+    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, VirtualCells, ColumnType},
     poly::Rotation,
 };
 
@@ -69,6 +69,81 @@ Example bus mapping:
 |    3   |    1    |       49       |  32   |             |            |  0   |
 */
 
+
+// use halo2_proofs::plonk::{Column, ColumnType};
+struct AutoColumn<C: ColumnType>(Column<C>);
+
+struct Expr<F: FieldExt>(Expression<F>);
+
+trait ExpresionBuilder<C: ColumnType, F: FieldExt> {
+    fn build(&self, meta: &mut VirtualCells<F>, rotation: Rotation) -> Expression<F>;
+}
+impl<F: FieldExt> ExpresionBuilder<Fixed, F> for AutoColumn<Fixed> {
+    fn build(&self, meta: &mut VirtualCells<F>, rotation: Rotation) -> Expression<F> {
+        meta.query_fixed(self.0, rotation)
+    }
+}
+impl<F: FieldExt> ExpresionBuilder<Advice, F> for AutoColumn<Advice> {
+    fn build(&self, meta: &mut VirtualCells<F>, rotation: Rotation) -> Expression<F> {
+        meta.query_advice(self.0, rotation)
+    }
+}
+macro_rules! cur {
+    ($meta:ident, $column:ident) =>{
+        AutoColumn($column).build($meta, Rotation::cur())
+    }
+}
+macro_rules! next {
+    ($meta:ident, $column:ident) =>{
+        AutoColumn($column).build($meta, Rotation::next())
+    }
+}
+macro_rules! prev {
+    ($meta:ident, $column:ident) =>{
+        AutoColumn($column).build($meta, Rotation::prev())
+    }
+}
+macro_rules! not {
+    ($expr:expr) =>{
+        Expression::Constant(F::from(1)) - $expr
+    }
+}
+macro_rules! and {
+    ($lhs:expr, $rhs: expr)=>{
+        $lhs * $rhs
+    }
+}
+macro_rules! bool {
+    ($expr:expr) =>{
+        $expr.clone() * (Expression::Constant(F::from(1)) - $expr.clone())    
+    }
+}
+macro_rules! eq_in_range {
+    ($expr:expr, $value:expr) => {
+        generate_lagrange_base_polynomial($expr, $value, EMPTY_TAG..=STORAGE_TAG) 
+    };
+}
+
+macro_rules! fill_table {
+    ($layouter: expr, $column: expr, $from: expr, $to: expr) => {
+    $layouter
+    .assign_region(
+        || "memory address table with zero",
+        |mut region| {
+            for idx in $from..=$to {
+                region.assign_fixed(
+                    || stringify!($column),
+                    $column,
+                    idx,
+                    || Ok(F::from(idx as u64)),
+                )?;
+            }
+            Ok(())
+        },
+    )
+    }
+}
+
 const EMPTY_TAG: usize = 0;
 const START_TAG: usize = 1;
 const MEMORY_TAG: usize = 2;
@@ -115,14 +190,15 @@ pub struct Config<
     storage_key: Column<Advice>,
     storage_key_diff_inv: Column<Advice>,
     value_prev: Column<Advice>,
-    rw_counter_table: Column<Fixed>,
-    memory_address_table_zero: Column<Fixed>,
-    stack_address_table_zero: Column<Fixed>,
-    memory_value_table: Column<Fixed>,
     address_diff_is_zero: IsZeroConfig<F>,
     address_monotone: MonotoneConfig,
     padding_monotone: MonotoneConfig,
     storage_key_diff_is_zero: IsZeroConfig<F>,
+
+    rw_counter_table: Column<Fixed>,
+    memory_address_table_zero: Column<Fixed>,
+    stack_address_table_zero: Column<Fixed>,
+    memory_value_table: Column<Fixed>,
 }
 
 impl<
@@ -168,14 +244,10 @@ impl<
         let q_memory_first = |meta: &mut VirtualCells<F>| {
             // For first memory row it holds q_target_cur = START_TAG and q_target_next
             // = MEMORY_TAG.
-            let q_target_cur = meta.query_fixed(q_target, Rotation::cur());
-            let q_target_next = meta.query_fixed(q_target, Rotation::next());
-            generate_lagrange_base_polynomial(q_target_cur, START_TAG, EMPTY_TAG..=STORAGE_TAG)
-                * generate_lagrange_base_polynomial(
-                    q_target_next,
-                    MEMORY_TAG,
-                    EMPTY_TAG..=STORAGE_TAG,
-                )
+            and!(
+                eq_in_range!(cur!(meta, q_target), START_TAG),
+                eq_in_range!(next!(meta, q_target), MEMORY_TAG)
+            )
         };
 
         let q_memory_not_first = |meta: &mut VirtualCells<F>| {
@@ -196,6 +268,7 @@ impl<
         };
 
         let q_stack_not_first = |meta: &mut VirtualCells<F>| {
+            eq_in_range!(cur!(meta, q_target), STACK_TAG);
             let q_target = meta.query_fixed(q_target, Rotation::cur());
             generate_lagrange_base_polynomial(q_target, STACK_TAG, EMPTY_TAG..=STORAGE_TAG)
         };
@@ -315,16 +388,16 @@ impl<
 
         meta.create_gate("Stack operation", |meta| {
             let q_stack_not_first = q_stack_not_first(meta);
-            let value_cur = meta.query_advice(value, Rotation::cur());
-            let flag = meta.query_advice(flag, Rotation::cur());
+            let value_cur = cur!(meta, value);
+            let flag = cur!(meta,flag);
 
             // flag == 0 or 1
             // (flag) * (1 - flag)
-            let bool_check_flag = flag.clone() * (one.clone() - flag.clone());
+            let bool_check_flag =bool!(flag);
 
             // If flag == 0 (read), and rw_counter != 0, value_prev == value_cur
-            let value_prev = meta.query_advice(value, Rotation::prev());
-            let q_read = one.clone() - flag;
+            let value_prev = prev!(meta, value);
+            let q_read = not!(flag);
             // when addresses changes, we don't require the operation is write as this is
             // enforced by evm circuit
 
@@ -340,11 +413,11 @@ impl<
         // address_cur == address_prev. (Recall that operations are
         // ordered first by address, and then by rw_counter.)
         meta.lookup_any("rw counter monotonicity", |meta| {
-            let rw_counter_table = meta.query_fixed(rw_counter_table, Rotation::cur());
-            let rw_counter_prev = meta.query_advice(rw_counter, Rotation::prev());
-            let rw_counter = meta.query_advice(rw_counter, Rotation::cur());
-            let padding = meta.query_advice(padding, Rotation::cur());
-            let is_not_padding = one.clone() - padding;
+            let rw_counter_table = cur!(meta,rw_counter_table);
+            let rw_counter_prev = prev!(meta, rw_counter);
+            let rw_counter = cur!(meta, rw_counter);
+            let padding = cur!(meta, padding);
+            let is_not_padding = not!(padding);
             let q_not_first = q_memory_not_first(meta) + q_stack_not_first(meta);
 
             vec![(
@@ -538,71 +611,10 @@ impl<
 
     /// Load lookup table / other fixed constants for this configuration.
     pub(crate) fn load(&self, layouter: &mut impl Layouter<F>) -> Result<(), Error> {
-        layouter
-            .assign_region(
-                || "global counter table",
-                |mut region| {
-                    for idx in 0..=RW_COUNTER_MAX {
-                        region.assign_fixed(
-                            || "global counter table",
-                            self.rw_counter_table,
-                            idx,
-                            || Ok(F::from(idx as u64)),
-                        )?;
-                    }
-                    Ok(())
-                },
-            )
-            .ok();
-
-        layouter
-            .assign_region(
-                || "memory value table",
-                |mut region| {
-                    for idx in 0..=255 {
-                        region.assign_fixed(
-                            || "memory value table",
-                            self.memory_value_table,
-                            idx,
-                            || Ok(F::from(idx as u64)),
-                        )?;
-                    }
-                    Ok(())
-                },
-            )
-            .ok();
-
-        layouter
-            .assign_region(
-                || "memory address table with zero",
-                |mut region| {
-                    for idx in 0..=MEMORY_ADDRESS_MAX {
-                        region.assign_fixed(
-                            || "address table with zero",
-                            self.memory_address_table_zero,
-                            idx,
-                            || Ok(F::from(idx as u64)),
-                        )?;
-                    }
-                    Ok(())
-                },
-            )
-            .ok();
-
-        layouter.assign_region(
-            || "stack address table with zero",
-            |mut region| {
-                for idx in 0..=STACK_ADDRESS_MAX {
-                    region.assign_fixed(
-                        || "stack address table with zero",
-                        self.stack_address_table_zero,
-                        idx,
-                        || Ok(F::from(idx as u64)),
-                    )?;
-                }
-                Ok(())
-            },
-        )
+        fill_table!(layouter,self.rw_counter_table,0,RW_COUNTER_MAX).ok();
+        fill_table!(layouter,self.memory_value_table,0,255).ok();
+        fill_table!(layouter,self.memory_address_table_zero,0,MEMORY_ADDRESS_MAX).ok();
+        fill_table!(layouter,self.stack_address_table_zero,0,STACK_ADDRESS_MAX)
     }
 
     fn assign_memory_ops(

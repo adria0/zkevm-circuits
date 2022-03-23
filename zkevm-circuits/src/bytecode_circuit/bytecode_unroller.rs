@@ -38,24 +38,48 @@ pub(crate) struct UnrolledBytecode<F: Field> {
 
 #[derive(Clone, Debug)]
 pub struct Config<F> {
+    /// Random value for RLC
     r: F,
+    /// TODO document
     minimum_rows: usize,
+    /// TODO document
     q_enable: Selector,
+    /// 1 on the first row, else 0
     q_first: Column<Fixed>,
+    /// 1 on the last row, else 0
     q_last: Selector,
+    /// The keccak hash of the bytecode
     hash: Column<Advice>,
+    /// The position of the byte in the bytecode
     index: Column<Advice>,
+    /// 1 if the byte is code, 0 if the byte is PUSH data
     is_code: Column<Advice>,
+    /// The byte data for the current position
     byte: Column<Advice>,
+    /// TODO check The number of PUSH data bytes that still follow the current
+    /// row
     push_rindex: Column<Advice>,
+    /// The accumulator containing the current and previous byte. hash_rlc :=
+    /// hash_rlc_prev * r + byte
     hash_rlc: Column<Advice>,
+    /// The bytecode length ( the number of bytes hashed in hash_rlc )
     hash_length: Column<Advice>,
+    /// The number of bytes pushed for the current byte
     byte_push_size: Column<Advice>,
+    /// 1 if the current byte is the last byte of the bytecode, else 0
     is_final: Column<Advice>,
+    /// 1 if the current row is padding, else 0
     padding: Column<Advice>,
+    /// TODO(check) 0 if [`push_rindex`] is zero, else 1
     push_rindex_inv: Column<Advice>,
+    /// Config for a gadget that checks if [`push_rindex`] is zero
     push_rindex_is_zero: IsZeroConfig<F>,
+    /// The push lookup table is used to find how many bytes an opcode pushes
+    /// which we need to know to detect which byte is code and which byte is
+    /// not. Because we do this lookup for each byte this table is also
+    /// indirectly used to range check the byte inputs.
     push_table: [Column<Fixed>; PUSH_TABLE_WIDTH],
+    /// TODO(document)
     keccak_table: [Column<Advice>; KECCAK_WIDTH],
 }
 
@@ -101,6 +125,18 @@ impl<F: Field> Config<F> {
                 not::expr(meta.query_advice(is_final, Rotation::prev())),
             ])
         };
+
+        //  code      ; gates activated
+        //  ---------------------------
+        //  | PUSH1   | always, start
+        //  | 60      | padding, always, continue
+        //  | DUP     | padding, always, continue
+        //  | ADD     | padding, always, continue
+        //  | STOP    | padding, always, last row
+        //  | -       | padding, always
+        //  | -       | padding, always
+        //  | -       | padding, always
+        //
 
         meta.create_gate("continue", |meta| {
             let mut cb = BaseConstraintBuilder::default();
@@ -354,8 +390,8 @@ impl<F: Field> Config<F> {
                                 hash_rlc,
                                 hash_length,
                                 F::from(byte_push_size as u64),
-                                row.index + F::one() == hash_length,
-                                false,
+                                row.index + F::one() == hash_length, // is_final
+                                false,                               // padding
                                 F::from(push_rindex_prev),
                             )?;
                             push_rindex_prev = push_rindex;
@@ -368,19 +404,19 @@ impl<F: Field> Config<F> {
                         self.set_row(
                             &mut region,
                             &push_rindex_is_zero_chip,
-                            idx,
-                            idx < size,
-                            idx == last_row_offset,
-                            F::zero(),
-                            F::zero(),
-                            F::one(),
-                            F::zero(),
-                            0,
-                            F::zero(),
-                            F::one(),
-                            F::zero(),
-                            true,
-                            true,
+                            idx,                    // offset
+                            idx < size,             // enable
+                            idx == last_row_offset, // last
+                            F::zero(),              // hash
+                            F::zero(),              // index
+                            F::one(),               // is_code
+                            F::zero(),              // byte
+                            0,                      // push_rindex
+                            F::zero(),              // hash_rlc
+                            F::one(),               // hash_length
+                            F::zero(),              // byte_push_size
+                            true,                   // is_final
+                            true,                   // padding
                             F::from(push_rindex_prev),
                         )?;
                         push_rindex_prev = 0;
